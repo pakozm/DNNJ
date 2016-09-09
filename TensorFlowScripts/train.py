@@ -174,7 +174,8 @@ rp = tf.placeholder("float", shape=[])
 # In[12]:
 
 def weight_variable(shape, *args, **kwargs):
-  initial = tf.truncated_normal(shape, stddev=0.2)
+  #initial = tf.truncated_normal(shape, stddev=0.2)
+  initial = tf.contrib.layers.xavier_initializer()
   return tf.Variable(initial, *args, **kwargs)
 
 def bias_variable(shape, value, *args, **kwargs):
