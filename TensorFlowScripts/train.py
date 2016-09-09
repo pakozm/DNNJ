@@ -33,6 +33,7 @@ from six.moves import xrange  # pylint: disable=redefined-builtin
 MNIST_BASIC_URL = "http://www.iro.umontreal.ca/~lisa/icml2007data/mnist.zip"
 MNIST_ZIP_FILENAME = "mnist-basic.zip"
 
+DATA_DIR = "./"
 TRAIN = "mnist_train.amat"
 TEST = "mnist_test.amat"
 
