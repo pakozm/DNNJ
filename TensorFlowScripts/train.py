@@ -17,11 +17,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import os
+import sys
+sys.path.append(os.path.dirname(sys.argv[0]))
+
 import common
 import gzip
 import math
 import numpy as np
-import os
 import tensorflow as tf
 import urllib
 
@@ -34,7 +37,7 @@ TRAIN = "mnist_train.amat"
 TEST = "mnist_test.amat"
 
 common.downloadData(MNIST_BASIC_URL, MNIST_ZIP_FILENAME)
-os.system("unzip " + MNIST_ZIP_FILENAME)
+if not os.path.exists(TRAIN): os.system("unzip " + MNIST_ZIP_FILENAME)
   
 bunch_size = 128
 hidden_size = 2048

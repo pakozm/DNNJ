@@ -11,8 +11,11 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import os
+import urllib
+
 def downloadData(URL, DEST):
-    if not os.path.exists(args[1]):
-        if not os.path.exists(DEST):
-            opener = urllib.URLopener()
-            opener.retrieve(URL, DEST)
+    if not os.path.exists(DEST):
+        print "# Downloading " + URL + " into " + DEST
+        opener = urllib.URLopener()
+        opener.retrieve(URL, DEST)
