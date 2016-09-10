@@ -42,13 +42,13 @@ if not os.path.exists(TRAIN): os.system("unzip " + MNIST_ZIP_FILENAME)
   
 bunch_size = 128
 hidden_size = 2048
-num_layers = 3
+num_hidden_layers = 3
 replacement = 256
-rpdecay = 0.999
-rpenalty = 0.2
+gamma = 0.999 # exponential decay of unsupervised losses coefficients
+Lambda = 1 # 0.2  # initial value of unsupervised losses coefficients
 salt = 0.2
 weight_decay = 0.01
-learning_rate = 1e-03
+learning_rate = 1e-04
 assert replacement % bunch_size == 0
 
 np.random.seed(1234)
@@ -165,111 +165,128 @@ def read_data_sets(train_dir, fake_data=False, one_hot=False):
 
 # In[6]:
 
-mnist = read_data_sets(DATA_DIR, one_hot=True)
-
-x  = tf.placeholder("float", shape=[None, 784])
-y  = tf.placeholder("float", shape=[None, 10])
-rp = tf.placeholder("float", shape=[])
+x        = tf.placeholder("float", shape=[None, 784])
+y        = tf.placeholder("float", shape=[None, 10])
+lambda_k = tf.placeholder("float", shape=[])
 
 # In[12]:
 
-def weight_variable(shape, *args, **kwargs):
-  #initial = tf.truncated_normal(shape, stddev=0.2)
-  initial = tf.contrib.layers.xavier_initializer()
-  return tf.Variable(initial, *args, **kwargs)
+def weight_variable(name, shape, *args, **kwargs):
+  # initial = tf.truncated_normal(shape, stddev=0.2)
+  # return tf.Variable(initial, *args, **kwargs)
+  # fan_sum = shape[0] + shape[1]
+  # low = -4*np.sqrt(6.0/fan_sum) # use 4 for sigmoid, 1 for tanh activation 
+  # high = 4*np.sqrt(6.0/fan_sum)
+  # return tf.Variable(tf.random_uniform(shape, minval=low, maxval=high, dtype=tf.float32))
+  return tf.get_variable(name, shape=shape,
+                         initializer=tf.contrib.layers.xavier_initializer())
 
-def bias_variable(shape, value, *args, **kwargs):
-  initial = tf.constant(value, shape=shape)
-  return tf.Variable(initial, *args, **kwargs)
 
-def cross_entropy(hat_y,y):
-    return tf.reduce_mean( tf.nn.softmax_cross_entropy_with_logits(hat_y,y) )
+def bias_variable(name, shape, value, *args, **kwargs):
+  # initial = tf.constant(value, shape=shape)
+  # return tf.Variable(initial, *args, **kwargs)
+  return tf.get_variable(name, initializer = tf.constant(value, shape=shape))
 
-def cross_entropy2(hat_y,y):
-    return tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(hat_y,y) )
+def softmax_cross_entropy(hat_y,y):
+  return tf.reduce_mean( tf.nn.softmax_cross_entropy_with_logits(hat_y,y) )
+
+def sigmoid_cross_entropy(hat_y,y):
+  return tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(hat_y,y) )
 
 def sdae(x, w, b1, b2, m):
-    h = tf.nn.sigmoid( tf.matmul( tf.mul(x, m), w ) + b1 )
-    hat_x = tf.matmul( h, tf.transpose(w) ) + b2
-    return hat_x
+  h = tf.nn.sigmoid( tf.matmul( tf.mul(x, m), w ) + b1 )
+  hat_x = tf.matmul( h, tf.transpose(w) ) + b2
+  return hat_x
 
 # In[13]:
 
-sizes = [784] + [hidden_size]*num_layers + [10]
-Ws    = [ weight_variable([sizes[i],sizes[i+1]]) for i in range(len(sizes)-1) ]
-bs    = [ bias_variable([1,sizes[i+1]], 0.0) for i in range(len(sizes)-1) ]
-bs2   = [ bias_variable([1,sizes[i]], 0.0) for i in range(len(sizes)-1) ]
+sizes = [784] + [hidden_size]*num_hidden_layers + [10]
+Ws    = [ weight_variable("w" + str(i+1), [sizes[i],sizes[i+1]]) for i in range(num_hidden_layers+1) ]
+bs    = [ bias_variable("b" + str(i+1), [1,sizes[i+1]], 0.0) for i in range(num_hidden_layers+1) ]
+bs2   = [ bias_variable("b2_" + str(i), [1,sizes[i]], 0.0) for i in range(num_hidden_layers) ]
+
+assert len(Ws) == (len(sizes)-1)
 
 masks = [ tf.placeholder("float", shape=[None, sz]) for sz in sizes[:-1] ]
 
 Hs = [ x ]
 
-#with tf.name_scope("DNN") as scope:
-for i in range(len(Ws)-1):
+with tf.name_scope("DNN") as scope:
+  for i in range(len(Ws)-1):
     w,b,in_x = Ws[i],bs[i],Hs[-1]
     Hs.append( tf.nn.sigmoid( tf.matmul( in_x, w ) + b ) )
-hat_y = tf.matmul( Hs[-1], Ws[-1] ) + bs[-1]
-Ls = cross_entropy(hat_y, y)
-#tf.scalar_summary("Ls", Ls)
+  hat_y = tf.matmul( Hs[-1], Ws[-1] ) + bs[-1]
+  Ls = softmax_cross_entropy(hat_y, y)
+  tf.scalar_summary("Ls", Ls)
 
-#with tf.name_scope("SDAEs") as scope:
-Lus = [ rp*cross_entropy2(sdae(Hs[i],Ws[i],bs[i],bs2[i],masks[i]), Hs[i]) for i in range(len(Hs)) ]
-#for i,Lu in enumerate(Lus): tf.scalar_summary("Lu" + str(i), Lu)
+with tf.name_scope("SDAEs") as scope:
+  Lus = [ sigmoid_cross_entropy(sdae(Hs[i],Ws[i],bs[i],bs2[i],masks[i]), Hs[i]) for i in range(len(Hs)-1) ]
+  for i,Lu in enumerate(Lus): tf.scalar_summary("Lu" + str(i+1), Lu)
+  Lus = [ lambda_k*Lu for Lu in Lus ]
+  for i,Lu in enumerate(Lus): tf.scalar_summary("lambda_k_Lu" + str(i+1), Lu)
+  tf.scalar_summary("lambda_k", lambda_k)
 
-#with tf.name_scope("EmpiricalRisk") as scope:
-EmpiricalRisk = Ls
-for Lu in Lus: EmpiricalRisk += Lu
-#with tf.name_scope("Reg.") as scope2:
-#for w in Ws: EmpiricalRisk += weight_decay * tf.nn.l2_loss(w)
-EmpiricalRisk += weight_decay * tf.nn.l2_loss(Ws[-1])
-#    tf.scalar_summary("EmpiricalRisk", EmpiricalRisk)
+with tf.name_scope("EmpiricalRisk") as scope:
+  EmpiricalRisk = Ls
+  for Lu in Lus: EmpiricalRisk += Lu
+  # with tf.name_scope("Reg.") as scope2:
+  # for w in Ws: EmpiricalRisk += weight_decay * tf.nn.l2_loss(w)
+  EmpiricalRisk += weight_decay * tf.nn.l2_loss(Ws[-1])
+  tf.scalar_summary("EmpiricalRisk", EmpiricalRisk)
 
-#with tf.name_scope("Train") as scope:
-train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(EmpiricalRisk)
+with tf.name_scope("Train") as scope:
+  train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(EmpiricalRisk)
 
-#with tf.name_scope("Predict") as scope:
-correct_prediction = tf.equal(tf.argmax(tf.nn.softmax(hat_y),1), tf.argmax(y,1))
-accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
-#tf.scalar_summary("error", 1.0 - accuracy)
+with tf.name_scope("Predict") as scope:
+  correct_prediction = tf.equal(tf.argmax(tf.nn.softmax(hat_y),1), tf.argmax(y,1))
+  accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
+  accuracy_summary = tf.scalar_summary("error", 1.0 - accuracy)
 
-#merged = tf.merge_all_summaries()
-
-# Initializing the variables
+# Initializing the variables and the summaries
 init = tf.initialize_all_variables()
+merged_summaries = tf.merge_all_summaries()
+  
+# In[ ]:
 
+mnist = read_data_sets(DATA_DIR, one_hot=True)
 
 # In[ ]:
 
 # Launch the graph
 with tf.Session() as sess:
-    sess.run(init)
-    #writer = tf.train.SummaryWriter("/home/experimentos/tmp/jmlr_logs", sess.graph_def)    
-
-    best_val_acc = 0
-    best_tst_acc = 0
-    rp_value = rpenalty
-    for i in range(4000):
-        train_losses = []
-        for j in range(int(math.ceil(replacement/bunch_size))):
-            batch_x,batch_y = mnist.train.next_batch(bunch_size)
-            feed  = { x: batch_x, y: batch_y, rp: rp_value }
-            for k,sz in enumerate(sizes[:-1]):
-              feed[masks[k]] = np.random.binomial(1,salt,[bunch_size,sz])
-            #_,train_loss,result = sess.run([train_step,EmpiricalRisk,merged]).run(feed_dict=feed)
-            _,train_loss = sess.run([train_step,EmpiricalRisk], feed_dict=feed)
-            train_losses.append(train_loss)
-            #summary_str = result[0]
-            #writer.add_summary(summary_str, i+1)
-            rp_value *= rpdecay
-        train_loss = np.mean(train_losses)
-        val_acc = accuracy.eval(feed_dict={x: mnist.validation.images,
-                                           y: mnist.validation.labels})
-        val_loss = 1.0 - val_acc
-        if val_acc > best_val_acc and i > 400:
-            best_val_acc = val_acc
-            best_test_acc = accuracy.eval(feed_dict={x: mnist.test.images,
-                                                     y: mnist.test.labels})
-            print(i+1, train_loss, val_loss, 1.0 - best_test_acc)
-        else:
-            print(i+1, train_loss, val_loss)            
-    print(1.0-best_val_acc, 1.0-best_test_acc)
+  sess.run(init)
+  train_writer = tf.train.SummaryWriter("/tmp/jmlr_logs/train", sess.graph)
+  val_writer   = tf.train.SummaryWriter("/tmp/jmlr_logs/val", sess.graph)
+  test_writer   = tf.train.SummaryWriter("/tmp/jmlr_logs/test", sess.graph)
+  
+  best_val_acc = 0
+  best_tst_acc = 0
+  lambda_k_value = Lambda
+  current_batch = 0
+  for i in range(4000):
+    train_losses = []
+    for j in range(int(math.ceil(replacement/bunch_size))):
+      batch_x,batch_y = mnist.train.next_batch(bunch_size)
+      feed = { x: batch_x, y: batch_y, lambda_k: lambda_k_value }
+      for k,sz in enumerate(sizes[:-1]):
+        feed[masks[k]] = np.random.binomial(1,salt,[bunch_size,sz])
+      #_,train_loss,result = sess.run([train_step,EmpiricalRisk,merged_summaries]).run(feed_dict=feed)
+      _,train_loss,summary = sess.run([train_step,EmpiricalRisk,merged_summaries], feed_dict=feed)
+      train_losses.append(train_loss)
+      train_writer.add_summary(summary, current_batch)
+      lambda_k_value *= gamma
+      ++current_batch
+    train_loss = np.mean(train_losses)
+    feed = {x: mnist.validation.images, y: mnist.validation.labels}
+    val_acc,summary = sess.run([accuracy,accuracy_summary], feed_dict=feed)
+    val_writer.add_summary(summary, current_batch)
+    val_loss = 1.0 - val_acc
+    if val_acc > best_val_acc and i > 400:
+      best_val_acc = val_acc
+      feed = {x: mnist.test.images, y: mnist.test.labels}
+      best_test_acc,summary = sess.run([accuracy,accuracy_summary], feed_dict=feed)
+      test_writer.add_summary(summary, current_batch)
+      print(i+1, train_loss, val_loss, 1.0 - best_test_acc)
+    else:
+      print(i+1, train_loss, val_loss)            
+  print(1.0-best_val_acc, 1.0-best_test_acc)
