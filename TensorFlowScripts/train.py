@@ -45,13 +45,23 @@ hidden_size = 2048
 num_hidden_layers = 3
 replacement = 256
 gamma = 0.999 # exponential decay of unsupervised losses coefficients
-Lambda = 1 # 0.2  # initial value of unsupervised losses coefficients
+Lambda = 0.2  # initial value of unsupervised losses coefficients
 salt = 0.2
-weight_decay = 0.01
-learning_rate = 1e-04
+weight_decay = 1.0e-04
+learning_rate = 0.1
+max_grads_norm = 6.5
+use_full_sdae_criterion = True
 assert replacement % bunch_size == 0
 
 np.random.seed(1234)
+tf.set_random_seed(5678)
+
+def minimize_and_clip_by_norm(optimizer, objective, var_list, clip_value):
+  """Uses global norm for gradient clipping, which is the proper way (instead of
+  using tf.clip_by_norm)"""
+  gradients = optimizer.compute_gradients(objective, var_list=var_list)
+  clipped_list,global_norm = tf.clip_by_global_norm(zip(*gradients)[0], clip_value)
+  return optimizer.apply_gradients(zip(clipped_list, var_list))
 
 # In[2]:
 
@@ -165,9 +175,13 @@ def read_data_sets(train_dir, fake_data=False, one_hot=False):
 
 # In[6]:
 
-x        = tf.placeholder("float", shape=[None, 784])
-y        = tf.placeholder("float", shape=[None, 10])
-lambda_k = tf.placeholder("float", shape=[])
+# global_step = tf.Variable(0, name='global_step', trainable=False)
+x           = tf.placeholder("float", name="x", shape=[None, 784])
+y           = tf.placeholder("float", name="y", shape=[None, 10])
+lambda_k    = tf.placeholder("float", name="lambda_k", shape=[])
+
+tf.scalar_summary("lambda_k", lambda_k)
+# tf.scalar_summary("step", global_step)
 
 # In[12]:
 
@@ -179,7 +193,7 @@ def weight_variable(name, shape, *args, **kwargs):
   # high = 4*np.sqrt(6.0/fan_sum)
   # return tf.Variable(tf.random_uniform(shape, minval=low, maxval=high, dtype=tf.float32))
   return tf.get_variable(name, shape=shape,
-                         initializer=tf.contrib.layers.xavier_initializer())
+                         initializer=tf.contrib.layers.xavier_initializer(*args, **kwargs))
 
 
 def bias_variable(name, shape, value, *args, **kwargs):
@@ -193,7 +207,7 @@ def softmax_cross_entropy(hat_y,y):
 def sigmoid_cross_entropy(hat_y,y):
   return tf.reduce_mean( tf.nn.sigmoid_cross_entropy_with_logits(hat_y,y) )
 
-def sdae(x, w, b1, b2, m):
+def dae(x, w, b1, b2, m):
   h = tf.nn.sigmoid( tf.matmul( tf.mul(x, m), w ) + b1 )
   hat_x = tf.matmul( h, tf.transpose(w) ) + b2
   return hat_x
@@ -201,46 +215,70 @@ def sdae(x, w, b1, b2, m):
 # In[13]:
 
 sizes = [784] + [hidden_size]*num_hidden_layers + [10]
-Ws    = [ weight_variable("w" + str(i+1), [sizes[i],sizes[i+1]]) for i in range(num_hidden_layers+1) ]
-bs    = [ bias_variable("b" + str(i+1), [1,sizes[i+1]], 0.0) for i in range(num_hidden_layers+1) ]
-bs2   = [ bias_variable("b2_" + str(i), [1,sizes[i]], 0.0) for i in range(num_hidden_layers) ]
+Ws    = [ weight_variable("w" + str(i+1), [sizes[i],sizes[i+1]]) for i in xrange(num_hidden_layers+1) ]
+bs    = [ bias_variable("b" + str(i+1), [1,sizes[i+1]], 0.0) for i in xrange(num_hidden_layers+1) ]
+bs2   = [ bias_variable("b2_" + str(i), [1,sizes[i]], 0.0) for i in xrange(num_hidden_layers) ]
 
 assert len(Ws) == (len(sizes)-1)
 
-masks = [ tf.placeholder("float", shape=[None, sz]) for sz in sizes[:-1] ]
+masks = [ tf.placeholder("float", name="mask_"+str(i), shape=[None, sz]) for i,sz in enumerate(sizes[:-2]) ]
 
 Hs = [ x ]
 
 with tf.name_scope("DNN") as scope:
-  for i in range(len(Ws)-1):
+  for i in xrange(len(Ws)-1):
     w,b,in_x = Ws[i],bs[i],Hs[-1]
     Hs.append( tf.nn.sigmoid( tf.matmul( in_x, w ) + b ) )
   hat_y = tf.matmul( Hs[-1], Ws[-1] ) + bs[-1]
-  Ls = softmax_cross_entropy(hat_y, y)
-  tf.scalar_summary("Ls", Ls)
 
-with tf.name_scope("SDAEs") as scope:
-  Lus = [ sigmoid_cross_entropy(sdae(Hs[i],Ws[i],bs[i],bs2[i],masks[i]), Hs[i]) for i in range(len(Hs)-1) ]
-  for i,Lu in enumerate(Lus): tf.scalar_summary("Lu" + str(i+1), Lu)
-  Lus = [ lambda_k*Lu for Lu in Lus ]
-  for i,Lu in enumerate(Lus): tf.scalar_summary("lambda_k_Lu" + str(i+1), Lu)
-  tf.scalar_summary("lambda_k", lambda_k)
+with tf.name_scope("Supervised") as scope:
+  Ls = softmax_cross_entropy(hat_y, y)
+  tf.scalar_summary("L_s", Ls)
+
+with tf.name_scope("DAEs") as scope:
+  DAEs = [ dae(Hs[i],Ws[i],bs[i],bs2[i],masks[i]) for i in xrange(len(Hs)-1) ]
+  
+if use_full_sdae_criterion:
+  with tf.name_scope("SDAE") as scope:
+    prev = x
+    masks.append( tf.placeholder("float", name="mask_"+str(len(masks)),
+                                 shape=[None, prev.get_shape().as_list()[1]]) )
+    prev = tf.mul(prev, masks[-1])
+    for w,b in zip(Ws[:-1],bs[:-1]):
+      prev = tf.nn.sigmoid( tf.matmul( prev, w ) + b )
+    for w,b in zip(reversed(Ws[1:-1]), reversed(bs2[1:])):
+      prev = tf.nn.sigmoid( tf.matmul( prev, tf.transpose(w) ) + b )
+    SDAE_output = tf.matmul( prev, tf.transpose(Ws[0]) ) + bs2[0]
+      
+with tf.name_scope("Unsupervised") as scope:
+  Lus = [ sigmoid_cross_entropy(DAEs[i], Hs[i]) for i in xrange(len(DAEs)) ]
+  for i,Lu in enumerate(Lus): tf.scalar_summary("L_u" + str(i+1), Lu)
+  lambda_k_Lus = [ lambda_k*Lu for Lu in Lus ]
+  for i,lambda_Lu in enumerate(lambda_k_Lus): tf.scalar_summary("lambda_k_Lu" + str(i+1), lambda_Lu)
+  if use_full_sdae_criterion:
+    SDAE_Lu = sigmoid_cross_entropy(SDAE_output, x)
+    tf.scalar_summary("L_u_SDAE", SDAE_Lu)
+    lambda_k_SDAE_Lu = lambda_k * SDAE_Lu
+    tf.scalar_summary("lambda_k_SDAE_Lu", lambda_k_SDAE_Lu)
+    Lus.append( lambda_k_SDAE_Lu )
 
 with tf.name_scope("EmpiricalRisk") as scope:
-  EmpiricalRisk = Ls
-  for Lu in Lus: EmpiricalRisk += Lu
-  # with tf.name_scope("Reg.") as scope2:
-  # for w in Ws: EmpiricalRisk += weight_decay * tf.nn.l2_loss(w)
-  EmpiricalRisk += weight_decay * tf.nn.l2_loss(Ws[-1])
+  EmpiricalRisk = Ls + sum(lambda_k_Lus) + weight_decay*tf.nn.l2_loss(Ws[-1])
   tf.scalar_summary("EmpiricalRisk", EmpiricalRisk)
 
 with tf.name_scope("Train") as scope:
-  train_step = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(EmpiricalRisk)
-
+  train_step = minimize_and_clip_by_norm(tf.train.AdadeltaOptimizer(learning_rate=learning_rate,
+                                                                    epsilon=1e-08),
+                                         EmpiricalRisk,
+                                         tf.trainable_variables(),
+                                         max_grads_norm)
+                                         #global_step)
+                                         #.minimize(EmpiricalRisk)
+  
 with tf.name_scope("Predict") as scope:
   correct_prediction = tf.equal(tf.argmax(tf.nn.softmax(hat_y),1), tf.argmax(y,1))
-  accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
-  accuracy_summary = tf.scalar_summary("error", 1.0 - accuracy)
+  cls_error = 1.0 - tf.reduce_mean(tf.cast(correct_prediction, "float"))
+  cls_error_summary = tf.scalar_summary("classification_error", cls_error)
 
 # Initializing the variables and the summaries
 init = tf.initialize_all_variables()
@@ -257,36 +295,34 @@ with tf.Session() as sess:
   sess.run(init)
   train_writer = tf.train.SummaryWriter("/tmp/jmlr_logs/train", sess.graph)
   val_writer   = tf.train.SummaryWriter("/tmp/jmlr_logs/val", sess.graph)
-  test_writer   = tf.train.SummaryWriter("/tmp/jmlr_logs/test", sess.graph)
+  test_writer  = tf.train.SummaryWriter("/tmp/jmlr_logs/test", sess.graph)
   
-  best_val_acc = 0
-  best_tst_acc = 0
+  best_val_loss  = float("+inf")
+  best_tst_loss  = float("+inf")
   lambda_k_value = Lambda
-  current_batch = 0
-  for i in range(4000):
+  current_step   = 0
+  for i in xrange(4000):
     train_losses = []
-    for j in range(int(math.ceil(replacement/bunch_size))):
+    for j in xrange(int(math.ceil(replacement/bunch_size))):
       batch_x,batch_y = mnist.train.next_batch(bunch_size)
       feed = { x: batch_x, y: batch_y, lambda_k: lambda_k_value }
-      for k,sz in enumerate(sizes[:-1]):
-        feed[masks[k]] = np.random.binomial(1,salt,[bunch_size,sz])
+      for m in masks: feed[m] = np.random.binomial(1,salt,[bunch_size,m.get_shape().as_list()[1]])
       #_,train_loss,result = sess.run([train_step,EmpiricalRisk,merged_summaries]).run(feed_dict=feed)
       _,train_loss,summary = sess.run([train_step,EmpiricalRisk,merged_summaries], feed_dict=feed)
       train_losses.append(train_loss)
-      train_writer.add_summary(summary, current_batch)
+      current_step += 1
+      train_writer.add_summary(summary, current_step)
       lambda_k_value *= gamma
-      ++current_batch
     train_loss = np.mean(train_losses)
     feed = {x: mnist.validation.images, y: mnist.validation.labels}
-    val_acc,summary = sess.run([accuracy,accuracy_summary], feed_dict=feed)
-    val_writer.add_summary(summary, current_batch)
-    val_loss = 1.0 - val_acc
-    if val_acc > best_val_acc and i > 400:
-      best_val_acc = val_acc
+    val_loss,summary = sess.run([cls_error,cls_error_summary], feed_dict=feed)
+    val_writer.add_summary(summary, current_step)
+    if val_loss < best_val_loss and i > 400:
+      best_val_loss = val_loss
       feed = {x: mnist.test.images, y: mnist.test.labels}
-      best_test_acc,summary = sess.run([accuracy,accuracy_summary], feed_dict=feed)
-      test_writer.add_summary(summary, current_batch)
-      print(i+1, train_loss, val_loss, 1.0 - best_test_acc)
+      best_test_loss,summary = sess.run([cls_error,cls_error_summary], feed_dict=feed)
+      test_writer.add_summary(summary, current_step)
+      print(i+1, train_loss, val_loss, best_test_loss)
     else:
       print(i+1, train_loss, val_loss)            
-  print(1.0-best_val_acc, 1.0-best_test_acc)
+  print(best_val_loss, best_test_loss)
