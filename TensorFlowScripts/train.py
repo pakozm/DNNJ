@@ -47,10 +47,10 @@ replacement = 256
 gamma = 0.999 # exponential decay of unsupervised losses coefficients
 Lambda = 0.2  # initial value of unsupervised losses coefficients
 salt = 0.2
-weight_decay = 1.0e-04
-learning_rate = 0.1
+weight_decay = 1.0e-06
+learning_rate = 1.0
 max_grads_norm = 6.5
-use_full_sdae_criterion = True
+use_full_sdae_criterion = False
 assert replacement % bunch_size == 0
 
 np.random.seed(1234)
@@ -263,7 +263,7 @@ with tf.name_scope("Unsupervised") as scope:
     Lus.append( lambda_k_SDAE_Lu )
 
 with tf.name_scope("EmpiricalRisk") as scope:
-  EmpiricalRisk = Ls + sum(lambda_k_Lus) + weight_decay*tf.nn.l2_loss(Ws[-1])
+  EmpiricalRisk = Ls + tf.add_n(lambda_k_Lus) + weight_decay*tf.nn.l2_loss(Ws[-1])
   tf.scalar_summary("EmpiricalRisk", EmpiricalRisk)
 
 with tf.name_scope("Train") as scope:
