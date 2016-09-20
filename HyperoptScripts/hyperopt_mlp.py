@@ -8,9 +8,9 @@ import train_GED
 from hyperopt import hp, fmin, rand, tpe, STATUS_OK, Trials
 
 space = {
-    'lr': hp.loguniform('lr', math.log(1e-5), math.log(0.1)),
+    'lr': hp.loguniform('lr', math.log(1e-5), math.log(30)),
     'wd' : hp.choice('wd', [1e-1, 1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 0.0]),
-    'hsize': hp.choice('hsize', [64, 128, 256, 512, 1024, 2048, 4096]),
+    'hsize': hp.choice('hsize', [2048]),
     'nlayers': hp.choice('nlayers', [3]),
     'Lambda': hp.choice('Lambda', [0.0]),
     'gamma': hp.choice('gamma', [0.999])
@@ -18,6 +18,7 @@ space = {
 
 def objective(params):
     train_loss,val_loss = train_GED.main(params)
+    print "LOSSES: ",train_loss,val_loss
     return {
         'loss': train_loss,
         'loss_variance': train_loss * (1.0 - train_loss),
